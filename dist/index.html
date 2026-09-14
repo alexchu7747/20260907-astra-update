@@ -469,6 +469,17 @@
       scroll-behavior: smooth;
     }
 
+    .follow-chip {
+      border: 1px solid var(--accent);
+      color: var(--accent);
+      background: var(--accent-soft);
+      cursor: pointer;
+    }
+
+    .follow-chip:hover {
+      filter: brightness(.97);
+    }
+
     .sentence {
       border: 1px solid var(--line);
       border-radius: 9px;
@@ -1246,6 +1257,7 @@
               <h2 class="section-title">逐句精听</h2>
               <div class="chips">
                 <span class="chip" id="sentenceCount">0 句</span>
+                <button class="chip follow-chip" id="resumeSubtitleFollowBtn" type="button" hidden>回到当前句</button>
                 <label class="switch-row" style="padding: 5px 8px"><span>隐藏葡语</span><input id="hidePt" type="checkbox"></label>
                 <label class="switch-row" style="padding: 5px 8px"><span>隐藏中文</span><input id="hideZh" type="checkbox"></label>
               </div>
@@ -1462,6 +1474,8 @@
     let podcastMode = state.podcast.mode || "spotify";
     let audioObjectUrl = "";
     let activeSentenceId = null;
+    let subtitleAutoFollow = true;
+    let subtitleFollowTimer = null;
     let loopSentence = false;
     let suppressAutoSyncUntil = 0;
     let subtitleSyncLeadSeconds = 1.5;
@@ -2111,16 +2125,37 @@
       `).join("");
     }
 
-    function scrollToActiveSentence(behavior = "smooth") {
-      if (!activeSentenceId) return;
+    function setSubtitleAutoFollow(enabled) {
+      subtitleAutoFollow = enabled;
+      $("resumeSubtitleFollowBtn").hidden = enabled;
+      clearTimeout(subtitleFollowTimer);
+    }
+
+    function pauseSubtitleAutoFollow() {
+      if (!state.subtitles.length) return;
+      setSubtitleAutoFollow(false);
+      subtitleFollowTimer = setTimeout(() => {
+        setSubtitleAutoFollow(true);
+        scrollToActiveSentence("smooth", true);
+      }, 10000);
+    }
+
+    function scrollToActiveSentence(behavior = "smooth", force = false) {
+      if (!activeSentenceId || (!subtitleAutoFollow && !force)) return;
       requestAnimationFrame(() => {
         const list = $("sentenceList");
         const el = document.querySelector(`[data-sentence="${activeSentenceId}"]`);
         if (!list || !el) return;
         const listRect = list.getBoundingClientRect();
         const elRect = el.getBoundingClientRect();
+        const previous = el.previousElementSibling;
+        const next = el.nextElementSibling;
+        const contextTop = previous?.getBoundingClientRect().top ?? elRect.top;
+        const contextBottom = next?.getBoundingClientRect().bottom ?? elRect.bottom;
+        const padding = 12;
+        if (!force && contextTop >= listRect.top + padding && contextBottom <= listRect.bottom - padding) return;
         list.scrollTo({
-          top: list.scrollTop + elRect.top - listRect.top - (list.clientHeight / 2) + (el.clientHeight / 2),
+          top: Math.max(0, list.scrollTop + elRect.top - listRect.top - (list.clientHeight * .42) + (el.clientHeight / 2)),
           behavior
         });
       });
@@ -2332,6 +2367,7 @@
     function setActiveSentence(id, play = true) {
       const sentence = getSentence(id);
       if (!sentence) return;
+      setSubtitleAutoFollow(true);
       activeSentenceId = id;
       suppressAutoSyncUntil = Date.now() + 900;
       if (mediaMode === "video" || isAudioPodcastMode()) seekTo(sentence.start, play);
@@ -2921,6 +2957,16 @@
         if (s) s.done = !s.done;
         saveState();
       }
+    });
+
+    $("sentenceList").addEventListener("wheel", pauseSubtitleAutoFollow, { passive: true });
+    $("sentenceList").addEventListener("touchstart", pauseSubtitleAutoFollow, { passive: true });
+    $("sentenceList").addEventListener("pointerdown", (event) => {
+      if (event.pointerType === "mouse" && event.offsetX >= $("sentenceList").clientWidth) pauseSubtitleAutoFollow();
+    });
+    $("resumeSubtitleFollowBtn").addEventListener("click", () => {
+      setSubtitleAutoFollow(true);
+      scrollToActiveSentence("smooth", true);
     });
 
     $("sentenceList").addEventListener("input", (event) => {
