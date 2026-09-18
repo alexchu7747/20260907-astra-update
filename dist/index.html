@@ -2136,7 +2136,6 @@
       setSubtitleAutoFollow(false);
       subtitleFollowTimer = setTimeout(() => {
         setSubtitleAutoFollow(true);
-        scrollToActiveSentence("smooth", true);
       }, 10000);
     }
 
@@ -2147,15 +2146,17 @@
         const el = document.querySelector(`[data-sentence="${activeSentenceId}"]`);
         if (!list || !el) return;
         const listRect = list.getBoundingClientRect();
-        const elRect = el.getBoundingClientRect();
         const previous = el.previousElementSibling;
         const next = el.nextElementSibling;
-        const contextTop = previous?.getBoundingClientRect().top ?? elRect.top;
-        const contextBottom = next?.getBoundingClientRect().bottom ?? elRect.bottom;
+        const contextStart = previous || el;
+        const contextEnd = next || el;
+        const contextTop = contextStart.getBoundingClientRect().top;
+        const contextBottom = contextEnd.getBoundingClientRect().bottom;
+        const contextHeight = contextBottom - contextTop;
         const padding = 12;
         if (!force && contextTop >= listRect.top + padding && contextBottom <= listRect.bottom - padding) return;
         list.scrollTo({
-          top: Math.max(0, list.scrollTop + elRect.top - listRect.top - (list.clientHeight * .42) + (el.clientHeight / 2)),
+          top: Math.max(0, list.scrollTop + contextTop - listRect.top - Math.max(padding, (list.clientHeight - contextHeight) / 2)),
           behavior
         });
       });
