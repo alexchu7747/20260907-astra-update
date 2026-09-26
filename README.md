@@ -62,6 +62,7 @@ http://127.0.0.1:4173/
 
 - YouTube 链接播放
 - 本地字幕导入和清洗
+- 可选华为云 MaaS AI 字幕深度清洗（保留时间轴，不自动翻译）
 - 字幕预览
 - 点击句子跳转
 - 上一句 / 下一句
@@ -71,7 +72,22 @@ http://127.0.0.1:4173/
 - 点击单词查词
 - 精读文章导入和点击查词
 - 基础语料库
-- OpenAI 设置和预算入口
+- 华为云 MaaS 设置和预算入口
+
+## 华为云 MaaS 配置
+
+推荐在本地服务中配置环境变量，API Key 不会进入浏览器存储：
+
+```bash
+export HUAWEI_MAAS_API_KEY="你的 API Key"
+export HUAWEI_MAAS_MODEL="glm-5.3"
+export HUAWEI_MAAS_ENDPOINT="https://api.modelarts-maas.com/v2/chat/completions"
+npm run dev
+```
+
+如果服务开通在中国香港区域，请把 API 地址改为控制台显示的地址，例如 `https://api-ap-southeast-1.modelarts-maas.com/v2/chat/completions`。模型 ID 和接口地址以 MaaS 控制台“API 调用”页面为准。
+
+GitHub Pages 没有后端，个人使用时可以在“设置”中填写 API Key、接口地址和模型 ID。字幕导入区勾选“使用 AI 深度清洗”后，工具会先执行原有规则清洗，再分批交给 AI 修正明显识别错误、断句、标点、乱码和重复片段。AI 不应扩写、翻译或改动时间轴；返回结构异常时不会替换现有字幕。
 
 ## 文件结构
 
@@ -93,4 +109,4 @@ portuguese-study-tool/
 
 学习数据保存在浏览器本地存储里。公开网站不会自带数据库，不会同步不同设备的数据。
 
-OpenAI API Key 不应该写进代码或提交到 GitHub。当前版本只允许用户在网页设置里手动填写，Key 会保存在当前浏览器的本地存储中。公开网站如果要给多人使用，建议后续增加后端代理和账户系统，不要把共享 API Key 放在前端。
+华为云 MaaS API Key 不应该写进代码或提交到 GitHub。本地运行建议使用 `HUAWEI_MAAS_API_KEY` 环境变量。若在静态网页的设置中填写，Key 会保存在当前浏览器的本地存储中，只适合个人设备；公开网站给多人使用时应使用后端代理，不要把共享 API Key 放在前端。

@@ -38,6 +38,58 @@ function readJsonBody(req, limit = 120000) {
   });
 }
 
+async function handleHuaweiAi(req, res) {
+  if (req.method !== "POST") {
+    sendJson(res, 405, { error: "Method not allowed" });
+    return;
+  }
+
+  const key = process.env.HUAWEI_MAAS_API_KEY;
+  if (!key) {
+    sendJson(res, 400, { error: "本地服务未配置 HUAWEI_MAAS_API_KEY" });
+    return;
+  }
+
+  try {
+    const body = await readJsonBody(req);
+    const prompt = String(body.prompt || "").trim();
+    if (!prompt) {
+      sendJson(res, 400, { error: "提示词为空" });
+      return;
+    }
+
+    const endpoint = process.env.HUAWEI_MAAS_ENDPOINT || "https://api.modelarts-maas.com/v2/chat/completions";
+    const model = process.env.HUAWEI_MAAS_MODEL || String(body.model || "glm-5.3").trim();
+    const upstream = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${key}`
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: "你是严谨的葡萄牙语学习助手。严格遵循用户要求，不补充未经提供的事实。" },
+          { role: "user", content: prompt }
+        ],
+        temperature: Number(body.temperature ?? 0.2),
+        max_tokens: Math.min(8000, Math.max(64, Number(body.maxTokens) || 1200))
+      })
+    });
+
+    if (!upstream.ok) {
+      const message = await upstream.text();
+      sendJson(res, upstream.status, { error: message.slice(0, 500) || "华为云 MaaS 请求失败" });
+      return;
+    }
+
+    const data = await upstream.json();
+    sendJson(res, 200, { text: data?.choices?.[0]?.message?.content || "", usage: data?.usage || null });
+  } catch (error) {
+    sendJson(res, 500, { error: error.message || "华为云 MaaS 调用失败" });
+  }
+}
+
 async function handleElevenLabsTts(req, res) {
   if (req.method !== "POST") {
     sendJson(res, 405, { error: "Method not allowed" });
@@ -97,6 +149,10 @@ async function handleElevenLabsTts(req, res) {
 
 const server = http.createServer((req, res) => {
   const requestPath = decodeURIComponent(req.url.split("?")[0]);
+  if (requestPath === "/api/ai/chat") {
+    handleHuaweiAi(req, res);
+    return;
+  }
   if (requestPath === "/api/tts/elevenlabs") {
     handleElevenLabsTts(req, res);
     return;
