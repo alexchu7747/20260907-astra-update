@@ -1201,7 +1201,10 @@
                     <label class="switch-row"><span>合并过碎字幕</span><input id="mergeShort" type="checkbox" checked></label>
                     <label class="switch-row"><span>相邻去重</span><input id="dedupeLines" type="checkbox" checked></label>
                     <label class="switch-row"><span>尝试识别双语字幕</span><input id="detectBilingual" type="checkbox" checked></label>
+                    <label class="switch-row"><span>使用 AI 深度清洗</span><input id="useAiSubtitleCleaning" type="checkbox"></label>
                   </div>
+
+                  <div class="small">AI 清洗会在默认规则之后修正识别错误、标点和重复片段；不会翻译、改写意思或改变时间轴。调用前需配置华为云 MaaS。</div>
 
                   <div class="row-actions">
                     <button id="previewSubtitleBtn">预览清洗</button>
@@ -1414,15 +1417,16 @@
               <label><span>默认查词方式</span>
                 <select id="lookupMode">
                   <option value="free">免费优先</option>
-                  <option value="ai">OpenAI 优先</option>
+                  <option value="ai">华为云 AI 优先</option>
                   <option value="manual">只手动</option>
                 </select>
               </label>
               <label><span>免费句子翻译接口</span><input id="freeTranslateEndpoint" placeholder="https://api.mymemory.translated.net/get"></label>
-              <label><span>OpenAI API Key</span><input id="openaiKey" type="password" placeholder="sk-...，只保存在本机浏览器"></label>
+              <label><span>华为云 MaaS API Key</span><input id="huaweiApiKey" type="password" placeholder="本地后端已配置时可留空"></label>
+              <label><span>华为云 MaaS API 地址</span><input id="huaweiEndpoint" placeholder="https://api.modelarts-maas.com/v2/chat/completions"></label>
               <div class="form-grid">
-                <label><span>模型 ID</span><input id="openaiModel" placeholder="gpt-5.4-mini"></label>
-                <label><span>单次批量 AI 翻译上限</span><input id="batchLimit" type="number" min="1" max="500"></label>
+                <label><span>模型 ID</span><input id="huaweiModel" placeholder="glm-5.3"></label>
+                <label><span>单批 AI 字幕条数</span><input id="batchLimit" type="number" min="5" max="40"></label>
               </div>
               <label><span>朗读来源</span>
                 <select id="ttsProvider">
@@ -1440,7 +1444,7 @@
                 <label><span>每月预算 USD</span><input id="monthlyBudget" type="number" min="0" step="0.1"></label>
               </div>
               <div class="small">
-                高质量朗读本地运行时可设置 ELEVENLABS_API_KEY 环境变量；网页直连填写的 Key 会保存在浏览器本地存储中，只建议个人本机使用。
+                AI 本地运行时优先使用 HUAWEI_MAAS_API_KEY；纯静态网页也可直连，但填写的 Key 会保存在浏览器本地，只建议个人设备使用。高质量朗读可设置 ELEVENLABS_API_KEY。
               </div>
             </div>
           </div>
@@ -1452,7 +1456,7 @@
             <div class="panel-body">
               <div class="card">
                 <strong id="budgetTitle">本月 $0.00</strong>
-                <div class="small" id="budgetText">AI 只有在你点击 AI 按钮时调用。批量字幕翻译会先确认数量。</div>
+                <div class="small" id="budgetText">AI 只在点击 AI 功能或勾选字幕 AI 清洗后调用；字幕会按设置的条数分批处理。</div>
               </div>
               <button id="resetUsageBtn">重置本月估算</button><div class="data-management"><h3>学习数据</h3><p class="small">导出的备份包含学习内容和进度，不包含 API 密钥。恢复时会合并内容，并保留当前设备设置。</p><button id="clearBtn" class="danger">清空此设备的学习数据</button></div>
             </div>
@@ -1480,6 +1484,7 @@
     let suppressAutoSyncUntil = 0;
     let subtitleSyncLeadSeconds = 1.5;
     let previewSubtitles = [];
+    let previewSourceSignature = "";
     let lastLookup = null;
     let ttsUtterance = null;
     let ttsVoices = [];
@@ -1555,8 +1560,9 @@
         settings: {
           lookupMode: "free",
           freeTranslateEndpoint: "https://api.mymemory.translated.net/get",
-          openaiKey: "",
-          openaiModel: "gpt-5.4-mini",
+          huaweiApiKey: "",
+          huaweiEndpoint: "https://api.modelarts-maas.com/v2/chat/completions",
+          huaweiModel: "glm-5.3",
           ttsProvider: "elevenlabs",
           elevenLabsApiKey: "",
           elevenLabsVoiceId: "21m00Tcm4TlvDq8ikWAM",
@@ -1576,6 +1582,10 @@
       };
       try {
         const loaded = JSON.parse(localStorage.getItem(storeKey));
+        if (loaded?.settings) {
+          delete loaded.settings.openaiKey;
+          delete loaded.settings.openaiModel;
+        }
         return deepMerge(fallback, loaded || {});
       } catch {
         return fallback;
@@ -2065,6 +2075,44 @@
       return out;
     }
 
+    function parseAiJson(text) {
+      const source = String(text || "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+      const start = source.indexOf("[");
+      const end = source.lastIndexOf("]");
+      if (start < 0 || end <= start) throw new Error("AI 没有返回可识别的字幕数据");
+      return JSON.parse(source.slice(start, end + 1));
+    }
+
+    async function cleanSubtitlesWithAi(entries) {
+      const result = [];
+      const batchSize = Math.min(40, Math.max(5, Number(state.settings.batchLimit) || 30));
+      for (let offset = 0; offset < entries.length; offset += batchSize) {
+        const batch = entries.slice(offset, offset + batchSize);
+        showToast(`AI 正在清洗字幕 ${offset + 1}-${Math.min(offset + batch.length, entries.length)} / ${entries.length}`);
+        const input = batch.map((item, index) => ({ i: index, pt: item.pt, zh: item.zh || "" }));
+        const prompt = `清洗下面的葡语学习字幕。请严格遵守：
+1. 只修正明显的语音识别错误、断句、大小写、标点、乱码和同一句内的重复片段；删除纯音效、口头噪声和无意义残片。
+2. 保持原意、语气、人名、数字和专有名词；不得扩写、概括、润色或凭空补词。
+3. pt 只保留葡语；zh 仅清洗原本已有的中文，原本为空时必须仍为空，不做翻译。
+4. 不合并、不拆分、不调换条目。每个 i 必须原样返回。若条目应删除，将 pt 和 zh 都设为空字符串。
+5. 只输出 JSON 数组，不要 Markdown 或说明，格式为 [{"i":0,"pt":"...","zh":"..."}]。
+
+输入：${JSON.stringify(input)}`;
+        const raw = await callHuaweiCloud(prompt, Math.max(800, batch.length * 90), 0);
+        if (!raw) throw new Error("AI 清洗未返回结果");
+        const cleaned = parseAiJson(raw);
+        const byIndex = new Map(cleaned.filter(item => Number.isInteger(item?.i)).map(item => [item.i, item]));
+        batch.forEach((original, index) => {
+          const candidate = byIndex.get(index);
+          if (!candidate) throw new Error(`AI 返回缺少第 ${offset + index + 1} 条字幕`);
+          const pt = typeof candidate.pt === "string" ? candidate.pt.trim() : original.pt;
+          const zh = typeof candidate.zh === "string" ? candidate.zh.trim() : original.zh;
+          if (pt || zh) result.push({ ...original, pt: pt || zh, zh });
+        });
+      }
+      return result;
+    }
+
     function formatTime(seconds) {
       const safe = Math.max(0, seconds || 0);
       const min = Math.floor(safe / 60);
@@ -2325,8 +2373,9 @@
     function renderSettings() {
       $("lookupMode").value = state.settings.lookupMode;
       $("freeTranslateEndpoint").value = state.settings.freeTranslateEndpoint;
-      $("openaiKey").value = state.settings.openaiKey;
-      $("openaiModel").value = state.settings.openaiModel;
+      $("huaweiApiKey").value = state.settings.huaweiApiKey;
+      $("huaweiEndpoint").value = state.settings.huaweiEndpoint;
+      $("huaweiModel").value = state.settings.huaweiModel;
       $("ttsProvider").value = state.settings.ttsProvider;
       $("elevenLabsApiKey").value = state.settings.elevenLabsApiKey;
       $("elevenLabsVoiceId").value = state.settings.elevenLabsVoiceId;
@@ -2420,7 +2469,7 @@
         return;
       }
       if (state.settings.lookupMode === "ai") {
-        await explainWithOpenAI(clean, sentence?.pt || "", "word");
+        await explainWithHuawei(clean, sentence?.pt || "", "word");
         return;
       }
       const local = miniDict[clean] || miniDict[stripPlural(clean)] || "";
@@ -2481,7 +2530,7 @@
     function estimateUsd(inputChars, outputChars) {
       const inputTokens = Math.ceil(inputChars / 3.5);
       const outputTokens = Math.ceil(outputChars / 3.5);
-      const model = state.settings.openaiModel || "";
+      const model = state.settings.huaweiModel || "";
       let inputPerMillion = .75;
       let outputPerMillion = 4.5;
       if (model.includes("nano")) {
@@ -2501,34 +2550,43 @@
       return !monthly || next <= monthly;
     }
 
-    async function callOpenAI(prompt, estimatedOutput = 600) {
-      const key = state.settings.openaiKey.trim();
-      if (!key) {
-        showToast("请先在设置里填写 OpenAI API Key");
-        return "";
-      }
+    async function callHuaweiCloud(prompt, estimatedOutput = 600, temperature = .2) {
+      const key = state.settings.huaweiApiKey.trim();
       const estimate = estimateUsd(prompt.length, estimatedOutput);
       if (!canSpend(estimate)) {
         showToast("已达到你设置的月预算上限");
         return "";
       }
-      const res = await fetch("https://api.openai.com/v1/responses", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${key}`
-        },
-        body: JSON.stringify({
-          model: state.settings.openaiModel || "gpt-5.4-mini",
-          input: prompt
-        })
-      });
+      const model = state.settings.huaweiModel || "glm-5.3";
+      const payload = { prompt, model, maxTokens: estimatedOutput, temperature };
+      const res = key
+        ? await fetch(state.settings.huaweiEndpoint || "https://api.modelarts-maas.com/v2/chat/completions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
+            body: JSON.stringify({
+              model,
+              messages: [
+                { role: "system", content: "你是严谨的葡萄牙语学习助手。严格遵循用户要求，不补充未经提供的事实。" },
+                { role: "user", content: prompt }
+              ],
+              temperature,
+              max_tokens: estimatedOutput
+            })
+          })
+        : await fetch("/api/ai/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          });
       if (!res.ok) {
         const text = await res.text();
-        throw new Error(text.slice(0, 300));
+        let message = text;
+        try { message = JSON.parse(text).error || text; } catch {}
+        if (!key && res.status === 404) message = "当前网页没有 AI 后端，请在设置中填写华为云 MaaS API Key";
+        throw new Error(String(message).slice(0, 300));
       }
       const data = await res.json();
-      const output = extractResponseText(data);
+      const output = key ? (data?.choices?.[0]?.message?.content || "") : (data.text || "");
       state.usage.estimatedUsd += estimateUsd(prompt.length, output.length);
       state.usage.calls += 1;
       saveState(false);
@@ -2537,22 +2595,13 @@
       return output;
     }
 
-    function extractResponseText(data) {
-      if (data.output_text) return data.output_text;
-      return (data.output || [])
-        .flatMap((item) => item.content || [])
-        .map((part) => part.text || "")
-        .join("\n")
-        .trim();
-    }
-
-    async function explainWithOpenAI(term, context, mode) {
+    async function explainWithHuawei(term, context, mode) {
       try {
         renderLookupLoading(term);
         const prompt = mode === "selection"
           ? `请用中文解释下面这段葡语，给出自然翻译、关键词和语法难点。只输出学习笔记。\n\n${term}`
           : `请作为葡语老师，用中文解释单词或短语「${term}」在当前句中的意思。请给出原形、词性、中文释义、当前语境含义、一个简短记忆提示。\n\n当前句：${context || "无"}`;
-        const result = await callOpenAI(prompt, 800);
+        const result = await callHuaweiCloud(prompt, 800);
         if (result) renderLookup(term, "", result, lastLookup?.sentence || null);
       } catch (error) {
         renderLookup(term, `AI 调用失败：${error.message}`, "", lastLookup?.sentence || null);
@@ -2912,23 +2961,57 @@
       };
     }
 
-    $("previewSubtitleBtn").addEventListener("click", () => {
-      previewSubtitles = parseSubtitle($("subtitleText").value, currentSubtitleOptions());
-      renderPreview(previewSubtitles);
-      showToast(`预览完成：${previewSubtitles.length} 句`);
+    function subtitleSourceSignature() {
+      return JSON.stringify([$("subtitleText").value, currentSubtitleOptions(), $("useAiSubtitleCleaning").checked]);
+    }
+
+    async function prepareSubtitles() {
+      const signature = subtitleSourceSignature();
+      if (signature === previewSourceSignature && previewSubtitles.length) return previewSubtitles;
+      let items = parseSubtitle($("subtitleText").value, currentSubtitleOptions());
+      if (!items.length) return [];
+      if ($("useAiSubtitleCleaning").checked) items = await cleanSubtitlesWithAi(items);
+      previewSubtitles = items;
+      previewSourceSignature = signature;
+      return items;
+    }
+
+    function setSubtitleCleaningBusy(busy) {
+      for (const id of ["previewSubtitleBtn", "applySubtitleBtn"]) $(id).disabled = busy;
+      $("previewSubtitleBtn").textContent = busy ? "AI 清洗中…" : "预览清洗";
+    }
+
+    $("previewSubtitleBtn").addEventListener("click", async () => {
+      setSubtitleCleaningBusy(true);
+      try {
+        const items = await prepareSubtitles();
+        renderPreview(items);
+        showToast(`预览完成：${items.length} 句`);
+      } catch (error) {
+        showToast(`字幕清洗失败：${error.message}`);
+      } finally {
+        setSubtitleCleaningBusy(false);
+      }
     });
 
-    $("applySubtitleBtn").addEventListener("click", () => {
-      previewSubtitles = parseSubtitle($("subtitleText").value, currentSubtitleOptions());
-      if (!previewSubtitles.length) return showToast("请先粘贴或导入字幕。");
-      if (state.subtitles.length && !confirm("导入会替换当前字幕和该字幕的听写笔记。已收藏的语料保留，继续吗？")) return;
-      state.subtitles = previewSubtitles;
-      activeSentenceId = state.subtitles[0]?.id || null;
-      saveState();
-      scrollToActiveSentence("auto");
-      $("importDrawer").classList.add("hidden");
-      $("toggleImportBtn").classList.remove("open");
-      showToast(`已进入精听：${state.subtitles.length} 句`);
+    $("applySubtitleBtn").addEventListener("click", async () => {
+      setSubtitleCleaningBusy(true);
+      try {
+        const items = await prepareSubtitles();
+        if (!items.length) return showToast("请先粘贴或导入字幕。");
+        if (state.subtitles.length && !confirm("导入会替换当前字幕和该字幕的听写笔记。已收藏的语料保留，继续吗？")) return;
+        state.subtitles = items;
+        activeSentenceId = state.subtitles[0]?.id || null;
+        saveState();
+        scrollToActiveSentence("auto");
+        $("importDrawer").classList.add("hidden");
+        $("toggleImportBtn").classList.remove("open");
+        showToast(`已进入精听：${state.subtitles.length} 句`);
+      } catch (error) {
+        showToast(`字幕清洗失败：${error.message}`);
+      } finally {
+        setSubtitleCleaningBusy(false);
+      }
     });
 
     $("sentenceList").addEventListener("click", (event) => {
@@ -3075,7 +3158,7 @@
     $("aiExplainSelectionBtn").addEventListener("click", () => {
       const text = selectedText();
       if (!text) return showToast("请先选中文本");
-      explainWithOpenAI(text, "", "selection");
+      explainWithHuawei(text, "", "selection");
     });
 
     $("saveSelectionBtn").addEventListener("click", () => {
@@ -3092,7 +3175,7 @@
 
     document.body.addEventListener("click", (event) => {
       const aiWord = event.target.dataset.aiWord;
-      if (aiWord) explainWithOpenAI(aiWord, lastLookup?.sentence?.pt || "", "word");
+      if (aiWord) explainWithHuawei(aiWord, lastLookup?.sentence?.pt || "", "word");
 
       const freeSentence = event.target.dataset.freeSentence;
       if (freeSentence) {
@@ -3143,8 +3226,9 @@
     $("saveSettingsBtn").addEventListener("click", () => {
       state.settings.lookupMode = $("lookupMode").value;
       state.settings.freeTranslateEndpoint = $("freeTranslateEndpoint").value.trim();
-      state.settings.openaiKey = $("openaiKey").value.trim();
-      state.settings.openaiModel = $("openaiModel").value.trim() || "gpt-5.4-mini";
+      state.settings.huaweiApiKey = $("huaweiApiKey").value.trim();
+      state.settings.huaweiEndpoint = $("huaweiEndpoint").value.trim() || "https://api.modelarts-maas.com/v2/chat/completions";
+      state.settings.huaweiModel = $("huaweiModel").value.trim() || "glm-5.3";
       state.settings.ttsProvider = $("ttsProvider").value;
       state.settings.elevenLabsApiKey = $("elevenLabsApiKey").value.trim();
       state.settings.elevenLabsVoiceId = $("elevenLabsVoiceId").value.trim() || "21m00Tcm4TlvDq8ikWAM";
@@ -3193,7 +3277,7 @@ Gosto desta luz porque deixa a cidade com uma cor muito especial.
     $("exportBtn").addEventListener("click", () => {
       persistReader();
       const backup = JSON.parse(JSON.stringify(state));
-      delete backup.settings.openaiKey;
+      delete backup.settings.huaweiApiKey;
       delete backup.settings.elevenLabsApiKey;
       const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
